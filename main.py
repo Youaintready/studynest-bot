@@ -1,96 +1,119 @@
 import os
-from telegram import Update, ReplyKeyboardMarkup
+from dotenv import load_dotenv
+from telegram import (
+    Update, 
+    KeyboardButton, 
+    ReplyKeyboardMarkup, 
+    ReplyKeyboardRemove
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, ConversationHandler, filters
+    Application, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ConversationHandler, 
+    ContextTypes
 )
 from pymongo import MongoClient
-from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
-
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
+# Setup MongoDB
 client = MongoClient(MONGO_URI)
 db = client["studynest"]
-users = db["users"]
+users_collection = db["users"]
 
-# States
-NAME, LEVEL, SUBJECTS, TIME, LOCATION, BIO = range(6)
+# Define states
+ASK_GRADE, ASK_NAME, ASK_LOCATION, FINISHED = range(4)
 
-education_levels = ["High School", "Undergrad", "Graduate", "Other"]
-study_times = ["Morning", "Afternoon", "Evening", "Flexible"]
+VALID_GRADES = ["Grade 10", "Grade 11", "Grade 12", "University Freshman"]
 
-def keyboard(options):
-    return ReplyKeyboardMarkup([[opt] for opt in options], resize_keyboard=True)
-
+# Start conversation
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🐣 Welcome to StudyNest!\nYour cozy place to find study buddies.\n\nWhat’s your name?"
+        "🎓 Welcome to StudyNest! Let's build your profile.\n\n"
+        "👉 First, choose your grade level:",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton(g)] for g in VALID_GRADES],
+            resize_keyboard=True
+        )
     )
-    return NAME
+    return ASK_GRADE
 
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["name"] = update.message.text
-    await update.message.reply_text("🎓 What’s your education level?", reply_markup=keyboard(education_levels))
-    return LEVEL
+# Handle grade selection
+async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    grade = update.message.text
+    if grade not in VALID_GRADES:
+        await update.message.reply_text("❗ Please choose a valid grade.")
+        return ASK_GRADE
 
-async def get_level(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["level"] = update.message.text
-    await update.message.reply_text("📚 What subjects are you interested in?\n(Separate with commas)", reply_markup=None)
-    return SUBJECTS
-
-async def get_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["subjects"] = [s.strip() for s in update.message.text.split(",")]
-    await update.message.reply_text("🕒 When do you prefer to study?", reply_markup=keyboard(study_times))
-    return TIME
-
-async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["time"] = update.message.text
-    await update.message.reply_text("🌍 Where are you located? (Or type 'skip')", reply_markup=None)
-    return LOCATION
-
-async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    loc = update.message.text
-    context.user_data["location"] = None if loc.lower() == "skip" else loc
-    await update.message.reply_text("🧑‍💬 Write a short fun bio about yourself:")
-    return BIO
-
-async def get_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["bio"] = update.message.text
-    context.user_data["telegram_id"] = update.message.from_user.id
-
-    users.update_one(
-        {"telegram_id": context.user_data["telegram_id"]},
-        {"$set": context.user_data},
-        upsert=True
+    context.user_data["grade"] = grade
+    await update.message.reply_text(
+        "🌟 Great! Now, what's your full name?",
+        reply_markup=ReplyKeyboardRemove()
     )
+    return ASK_NAME
 
-    await update.message.reply_text("✅ You’re all set! Welcome to StudyNest! 🎉")
-    return ConversationHandler.END
+# Ask for location
+async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["name"] = update.message.text.strip()
 
+    location_button = KeyboardButton("📍 Share Location", request_location=True)
+    await update.message.reply_text(
+        "📍 Please share your location to help us find study groups near you!",
+        reply_markup=ReplyKeyboardMarkup([[location_button]], resize_keyboard=True)
+    )
+    return ASK_LOCATION
+
+# Save user
+async def save_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.location:
+        location = update.message.location
+        user_data = {
+            "telegram_id": update.effective_user.id,
+            "name": context.user_data["name"],
+            "grade": context.user_data["grade"],
+            "location": {"lat": location.latitude, "lon": location.longitude}
+        }
+        users_collection.update_one(
+            {"telegram_id": user_data["telegram_id"]},
+            {"$set": user_data},
+            upsert=True
+        )
+        await update.message.reply_text(
+            f"🎉 Profile created successfully, {user_data['name']}!\n\n"
+            "📚 You'll now be matched with amazing study groups!",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❗ Please share your location using the button.")
+        return ASK_LOCATION
+
+# Cancel handler
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Registration cancelled. Use /start to try again.")
+    await update.message.reply_text("❌ Setup cancelled. You can start again anytime by sending /start.")
     return ConversationHandler.END
 
+# Main bot setup
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    conv = ConversationHandler(
+    conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-            LEVEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_level)],
-            SUBJECTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_subjects)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
-            LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_location)],
-            BIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_bio)],
+            ASK_GRADE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
+            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_location)],
+            ASK_LOCATION: [MessageHandler(filters.LOCATION, save_user)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    app.add_handler(conv)
+    app.add_handler(conv_handler)
+    print("🤖 StudyNest bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
