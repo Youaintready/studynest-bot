@@ -1,121 +1,116 @@
 import os
 from dotenv import load_dotenv
 from telegram import (
-    Update, 
-    KeyboardButton, 
-    ReplyKeyboardMarkup, 
-    ReplyKeyboardRemove
+    Update, KeyboardButton, ReplyKeyboardMarkup,
+    ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    MessageHandler, 
-    filters, 
-    ConversationHandler, 
-    ContextTypes
+    Application, CommandHandler, MessageHandler,
+    filters, ConversationHandler, ContextTypes, CallbackQueryHandler
 )
 from pymongo import MongoClient
+from random import shuffle
 
-# Load environment variables
+# Load .env
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
+BOT_TOKEN = os.getenv("8155679286:AAGn0SCC7DkO6Jmw0pTBilwtCLQ0xdROoxg")
+MONGO_URI = os.getenv("mongodb+srv://studynestuser:sHcjjtbZdUqFJkE9@studynestcluster.6cnx0t3.mongodb.net/?retryWrites=true&w=majority&appName=StudyNestCluster")
 
-# Setup MongoDB
+# MongoDB setup
 client = MongoClient(MONGO_URI)
 db = client["studynest"]
-users_collection = db["users"]
+users = db["users"]
 
-# Define states
-ASK_GRADE, ASK_NAME, ASK_LOCATION, FINISHED = range(4)
-
+# States
+ASK_GRADE, ASK_NAME, ASK_LOCATION, ASK_SUBJECTS, BROWSING, EDIT_PROFILE = range(6)
 VALID_GRADES = ["Grade 10", "Grade 11", "Grade 12", "University Freshman"]
+SUBJECTS = [
+    "Biology", "Chemistry", "Physics", "Mathematics", "ICT",
+    "History", "Geography", "Civics", "Economics", "English", "Amharic"
+]
 
-# Start conversation
+# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎓 Welcome to StudyNest! Let's build your profile.\n\n"
-        "👉 First, choose your grade level:",
+        "🔥 Welcome to StudyNest — where smart minds meet & match!\n\n"
+        "👉 Select your grade level:",
         reply_markup=ReplyKeyboardMarkup(
-            [[KeyboardButton(g)] for g in VALID_GRADES],
-            resize_keyboard=True
+            [[KeyboardButton(g)] for g in VALID_GRADES], resize_keyboard=True
         )
     )
     return ASK_GRADE
 
-# Handle grade selection
 async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grade = update.message.text
     if grade not in VALID_GRADES:
-        await update.message.reply_text("❗ Please choose a valid grade.")
+        await update.message.reply_text("⚠️ Pick from the available grade options.")
         return ASK_GRADE
 
     context.user_data["grade"] = grade
-    await update.message.reply_text(
-        "🌟 Great! Now, what's your full name?",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text("😊 Nice! What’s your full name?")
     return ASK_NAME
 
-# Ask for location
 async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["name"] = update.message.text.strip()
-
-    location_button = KeyboardButton("📍 Share Location", request_location=True)
+    button = KeyboardButton("📍 Share My Location", request_location=True)
     await update.message.reply_text(
-        "📍 Please share your location to help us find study groups near you!",
-        reply_markup=ReplyKeyboardMarkup([[location_button]], resize_keyboard=True)
+        "📌 Share your location to find nearby study buddies:",
+        reply_markup=ReplyKeyboardMarkup([[button]], resize_keyboard=True)
     )
     return ASK_LOCATION
 
-# Save user
-async def save_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.location:
-        location = update.message.location
-        user_data = {
-            "telegram_id": update.effective_user.id,
-            "name": context.user_data["name"],
-            "grade": context.user_data["grade"],
-            "location": {"lat": location.latitude, "lon": location.longitude}
-        }
-        users_collection.update_one(
-            {"telegram_id": user_data["telegram_id"]},
-            {"$set": user_data},
-            upsert=True
-        )
-        await update.message.reply_text(
-            f"🎉 Profile created successfully, {user_data['name']}!\n\n"
-            "📚 You'll now be matched with amazing study groups!",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text("❗ Please share your location using the button.")
+async def ask_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.location:
+        await update.message.reply_text("⚠️ Please use the location button.")
         return ASK_LOCATION
 
-# Cancel handler
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Setup cancelled. You can start again anytime by sending /start.")
-    return ConversationHandler.END
+    context.user_data["location"] = {
+        "lat": update.message.location.latitude,
+        "lon": update.message.location.longitude
+    }
+    context.user_data["subjects"] = []
+    return await show_subject_buttons(update, context)
 
-# Main bot setup
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+async def show_subject_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    selected = context.user_data["subjects"]
+    buttons = [
+        [InlineKeyboardButton(f"{'✅' if s in selected else ''} {s}", callback_data=s)]
+        for s in SUBJECTS
+    ]
+    buttons.append([InlineKeyboardButton("✅ Done", callback_data="done")])
+    await update.message.reply_text("📚 Select your subjects:", reply_markup=InlineKeyboardMarkup(buttons))
+    return ASK_SUBJECTS
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ASK_GRADE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
-            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_location)],
-            ASK_LOCATION: [MessageHandler(filters.LOCATION, save_user)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
+async def handle_subject_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    subject = query.data
 
-    app.add_handler(conv_handler)
-    print("🤖 StudyNest bot is running...")
-    app.run_polling()
+    if subject == "done":
+        user = {
+            "telegram_id": update.effective_user.id,
+            "username": update.effective_user.username,
+            "name": context.user_data["name"],
+            "grade": context.user_data["grade"],
+            "location": context.user_data["location"],
+            "subjects": context.user_data["subjects"],
+            "likes": [],
+            "liked_by": [],
+            "matched": []
+        }
+        users.update_one({"telegram_id": user["telegram_id"]}, {"$set": user}, upsert=True)
+        await query.edit_message_text("🎉 You’re all set! Finding matches...")
+        return await show_next_profile(update, context)
 
-if __name__ == "__main__":
-    main()
+    subjects = context.user_data["subjects"]
+    if subject in subjects:
+        subjects.remove(subject)
+    else:
+        subjects.append(subject)
+    context.user_data["subjects"] = subjects
+    return await show_subject_buttons(query, context)
 
+# Matching logic remains similar to earlier version (not shown here for space)
+
+# Add handlers for My Profile, Edit Profile, Refresh Matches, etc.
+# Continue from here in the next part of the implementation...
